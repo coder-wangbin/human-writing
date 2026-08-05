@@ -5,17 +5,13 @@ on:
     # 每天 UTC 2:00 自动执行（北京时间 10:00）
     - cron: '0 2 * * *'
   workflow_dispatch:
-    # 手动触发
 
 permissions:
   contents: write
-  pull-requests: write
-  workflows: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # 仅在 fork 仓库运行，不在上游仓库运行
     if: github.repository != 'KKKKhazix/human-writing'
 
     steps:
@@ -29,7 +25,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-      - name: Add upstream remote
+      - name: Add upstream and fetch
         run: |
           git remote add upstream https://github.com/KKKKhazix/human-writing.git
           git fetch upstream
@@ -37,45 +33,19 @@ jobs:
       - name: Check for upstream changes
         id: check
         run: |
-          # 统计 upstream/main 有多少个 commit 在 HEAD 之前（即 fork 还没拿到的上游新 commit）
           UPSTREAM_AHEAD=$(git rev-list --count HEAD..upstream/main)
 
-          echo "upstream_ahead=$UPSTREAM_AHEAD" >> $GITHUB_OUTPUT
-
           if [ "$UPSTREAM_AHEAD" -eq 0 ]; then
-            echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "✅ Fork 已是最新，无需同步"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
           else
+            echo "🔄 发现上游 $UPSTREAM_AHEAD 个新 commit，开始同步..."
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "🔄 检测到上游有 $UPSTREAM_AHEAD 个新 commit，准备同步..."
+            echo "count=$UPSTREAM_AHEAD" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create sync PR
+      - name: Merge upstream and push
         if: steps.check.outputs.has_changes == 'true'
         run: |
-          BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
-          git checkout -b "$BRANCH"
-          git merge upstream/main --no-edit
-          git push origin "$BRANCH"
-
-          # 检查是否已有同分支的开放 PR，避免重复创建
-          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')
-          if [ "$EXISTING" -gt 0 ]; then
-            echo "⏭️ 已有同名分支的开放 PR，跳过创建"
-            exit 0
-          fi
-
-          # 用 gh CLI 创建 PR（兼容 GITHUB_TOKEN 权限）
-          gh pr create \
-            --title "🔄 Sync: 同步上游 KKKKhazix/human-writing 最新变更" \
-            --base main \
-            --head "$BRANCH" \
-            --body "## 自动同步上游变更
-
-            源仓库: [KKKKhazix/human-writing](https://github.com/KKKKhazix/human-writing)
-
-            本次同步将上游 \`main\` 分支的最新 ${{ steps.check.outputs.upstream_ahead }} 个 commit 合并到当前 fork。
-
-            🤖 此 PR 由 GitHub Actions 自动创建。"
-
-          echo "✅ PR 已创建"
+          git merge upstream/main -m "sync: 合并上游 ${{ steps.check.outputs.count }} 个 commit [skip ci]" --no-edit
+          git push origin main
