@@ -1,0 +1,100 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    # 每天 UTC 2:00 自动执行（北京时间 10:00）
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # 手动触发
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # 仅在 fork 仓库运行，不在上游仓库运行
+    if: github.repository != 'KKKKhazix/human-writing'
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/KKKKhazix/human-writing.git
+          git fetch upstream
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          # 比较 upstream/main 和 origin/main
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          FORK_SHA=$(git rev-parse origin/main)
+
+          echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+          echo "fork_sha=$FORK_SHA" >> $GITHUB_OUTPUT
+
+          if [ "$UPSTREAM_SHA" = "$FORK_SHA" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "✅ Fork 已是最新，无需同步"
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "🔄 检测到上游有更新，准备同步..."
+          fi
+
+      - name: Create sync branch
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          git checkout -b "$BRANCH"
+          git merge upstream/main --no-edit
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> $GITHUB_ENV
+        id: branch
+
+      - name: Check existing sync PR
+        if: steps.check.outputs.has_changes == 'true'
+        id: pr-check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${process.env.BRANCH}`,
+            });
+            return pulls.length;
+
+      - name: Create Pull Request
+        if: steps.check.outputs.has_changes == 'true' && steps.pr-check.outputs.result == '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🔄 Sync: 同步上游 KKKKhazix/human-writing 最新变更',
+              head: process.env.BRANCH,
+              base: 'main',
+              body: `## 自动同步上游变更
+
+              源仓库: [KKKKhazix/human-writing](https://github.com/KKKKhazix/human-writing)
+
+              本次同步将上游 \`main\` 分支的最新变更合并到当前 fork。
+
+              🤖 此 PR 由 GitHub Actions 自动创建。`,
+              maintainer_can_modify: true,
+            });
+            console.log(`✅ PR 已创建: ${pr.html_url}`);
