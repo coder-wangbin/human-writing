@@ -22,7 +22,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
         run: |
@@ -37,64 +36,45 @@ jobs:
       - name: Check for upstream changes
         id: check
         run: |
-          # 比较 upstream/main 和 origin/main
-          UPSTREAM_SHA=$(git rev-parse upstream/main)
-          FORK_SHA=$(git rev-parse origin/main)
+          # 统计 upstream/main 有多少个 commit 在 HEAD 之前（即 fork 还没拿到的上游新 commit）
+          UPSTREAM_AHEAD=$(git rev-list --count HEAD..upstream/main)
 
-          echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
-          echo "fork_sha=$FORK_SHA" >> $GITHUB_OUTPUT
+          echo "upstream_ahead=$UPSTREAM_AHEAD" >> $GITHUB_OUTPUT
 
-          if [ "$UPSTREAM_SHA" = "$FORK_SHA" ]; then
+          if [ "$UPSTREAM_AHEAD" -eq 0 ]; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "✅ Fork 已是最新，无需同步"
           else
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "🔄 检测到上游有更新，准备同步..."
+            echo "🔄 检测到上游有 $UPSTREAM_AHEAD 个新 commit，准备同步..."
           fi
 
-      - name: Create sync branch
+      - name: Create sync PR
         if: steps.check.outputs.has_changes == 'true'
         run: |
           BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
           git checkout -b "$BRANCH"
           git merge upstream/main --no-edit
           git push origin "$BRANCH"
-          echo "branch=$BRANCH" >> $GITHUB_ENV
-        id: branch
 
-      - name: Check existing sync PR
-        if: steps.check.outputs.has_changes == 'true'
-        id: pr-check
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data: pulls } = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              head: `${context.repo.owner}:${process.env.BRANCH}`,
-            });
-            return pulls.length;
+          # 检查是否已有同分支的开放 PR，避免重复创建
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')
+          if [ "$EXISTING" -gt 0 ]; then
+            echo "⏭️ 已有同名分支的开放 PR，跳过创建"
+            exit 0
+          fi
 
-      - name: Create Pull Request
-        if: steps.check.outputs.has_changes == 'true' && steps.pr-check.outputs.result == '0'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data: pr } = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: '🔄 Sync: 同步上游 KKKKhazix/human-writing 最新变更',
-              head: process.env.BRANCH,
-              base: 'main',
-              body: `## 自动同步上游变更
+          # 用 gh CLI 创建 PR（兼容 GITHUB_TOKEN 权限）
+          gh pr create \
+            --title "🔄 Sync: 同步上游 KKKKhazix/human-writing 最新变更" \
+            --base main \
+            --head "$BRANCH" \
+            --body "## 自动同步上游变更
 
-              源仓库: [KKKKhazix/human-writing](https://github.com/KKKKhazix/human-writing)
+            源仓库: [KKKKhazix/human-writing](https://github.com/KKKKhazix/human-writing)
 
-              本次同步将上游 \`main\` 分支的最新变更合并到当前 fork。
+            本次同步将上游 \`main\` 分支的最新 ${{ steps.check.outputs.upstream_ahead }} 个 commit 合并到当前 fork。
 
-              🤖 此 PR 由 GitHub Actions 自动创建。`,
-              maintainer_can_modify: true,
-            });
-            console.log(`✅ PR 已创建: ${pr.html_url}`);
+            🤖 此 PR 由 GitHub Actions 自动创建。"
+
+          echo "✅ PR 已创建"
